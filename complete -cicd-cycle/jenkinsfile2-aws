@@ -1,0 +1,82 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    git branch: 'main', credentialsId: 'gitlab-login', url: 'https://gitlab.com/practice-group9221502/cicd-project.git'
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+                    withCredentials([string(credentialsId: 'sonar_qube_token', variable: 'SONAR_TOKEN')]) {
+                        sh '''
+                            /opt/sonar-scanner-5.0.1.3006-linux/bin/sonar-scanner \
+                            -Dsonar.projectKey=cicd-project \
+                            -Dsonar.sources=. \
+                            -Dsonar.host.url=http://34.237.91.224:9001/ \
+                            -Dsonar.login=$SONAR_TOKEN
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Containerizing PHP Application') {
+            steps {
+                echo 'Building Docker image for PHP application...'
+                sh 'sudo docker build -t docker.mnserviceproviders.com/php_hellow:v1 .'
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                echo 'Pushing Docker image to private repository...'
+                withCredentials([usernamePassword(credentialsId: 'docker-repo-credentials', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
+                    sh '''
+                        echo $DOCKER_PASSWORD | sudo docker login -u $DOCKER_USERNAME --password-stdin docker.mnserviceproviders.com
+                        sudo docker push docker.mnserviceproviders.com/php_hellow:v1
+                    '''
+                }
+            }
+        }
+
+        stage('Transfer and Execute Bash Script') {
+            steps {
+                script {
+                    def SSH_KEY_PATH = "/var/jenkins_home/ec2_pemkey.pem"
+                    def TARGET_REMOTE_HOST = "100.24.242.210"
+                    def USERNAME = "ubuntu"
+
+                    // Path to your bash script within Jenkins workspace
+                    def bashScript = '/var/jenkins_home/workspace/cicd-project/deployment_testserver.sh'
+
+                    // Convert line endings to Unix format using dos2unix on Jenkins machine (if needed)
+                    sh "dos2unix ${bashScript}"
+
+                    // Transfer script to target machine
+                    sh "scp -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${bashScript} ${USERNAME}@${TARGET_REMOTE_HOST}:/home/${USERNAME}/"
+
+                    // Optional: Set executable permissions on the script on the target machine
+                    sh "ssh -i ${SSH_KEY_PATH} ${USERNAME}@${TARGET_REMOTE_HOST} 'chmod +x /home/${USERNAME}/deployment_testserver.sh'"
+
+                    // Execute bash script on target machine
+                    sh "ssh -i ${SSH_KEY_PATH} ${USERNAME}@${TARGET_REMOTE_HOST} 'bash /home/${USERNAME}/deployment_testserver.sh'"
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline completed successfully!'
+        }
+        failure {
+            echo 'Pipeline failed!'
+        }
+    }
+}

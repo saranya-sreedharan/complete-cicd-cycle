@@ -1,0 +1,140 @@
+pipeline {
+      agent any
+
+      stages {
+          stage('Checkout') {
+              steps {
+                  script {
+                      // Checkout the git repository
+                      git branch: 'main', credentialsId: 'gitlab-login', url: 'https://gitlab.com/practice-group9221502/cicd-project.git'
+                  }
+              }
+          }
+
+          stage('SonarQube Analysis') {
+              steps {
+                  script {
+                      // Perform SonarQube analysis
+                      withCredentials([string(credentialsId: 'sonar_qube_token', variable: 'SONAR_TOKEN')]) {
+                          sh '''
+                              /opt/sonar-scanner-5.0.1.3006-linux/bin/sonar-scanner \
+                              -Dsonar.projectKey=cicd-project \
+                              -Dsonar.sources=. \
+                              -Dsonar.host.url=http://10.18.21.240:9001/ \
+                              -Dsonar.login=$SONAR_TOKEN
+                          '''
+                      }
+                  }
+              }
+          }
+
+          stage('Containerizing PHP Application') {
+              steps {
+                  script {
+                      // Build Docker image for PHP application
+                      echo 'Building Docker image for PHP application...'
+                      sh 'sudo docker build -t docker.mnserviceproviders.com/php_hellow:v1 .'
+                  }
+              }
+          }
+
+          stage('Push Docker Image') {
+              steps {
+                  script {
+                      // Push Docker image to private repository
+                      echo 'Pushing Docker image to private repository...'
+                      withCredentials([usernamePassword(credentialsId: 'docker-repo-credentials', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
+                          sh '''
+                              echo $DOCKER_PASSWORD | sudo docker login -u $DOCKER_USERNAME --password-stdin docker.mnserviceproviders.com
+                              sudo docker push docker.mnserviceproviders.com/php_hellow:v1
+                          '''
+                      }
+                  }
+              }
+          }
+
+          stage('Run API Tests') {
+              steps {
+                  script {
+                      // Run Newman command and generate the report
+                      catchError(buildResult: 'SUCCESS', stageResult: 'FAILURE') {
+                          sh 'newman run /var/jenkins_home/workspace/$JOB_NAME/mmdev2api.postman_collection__1_.json -r htmlextra'
+                      }
+                  }
+              }
+              post {
+                  always {
+                      script {
+                          // Move HTML report to a temporary location
+                          sh 'mv /var/jenkins_home/workspace/cicd-project/newman/*.html /tmp/'
+
+                          // Store HTML reports into PostgreSQL database
+                          def htmlReportsDir = "/tmp/"
+                          def htmlReports = sh(script: 'ls /tmp/*.html', returnStdout: true).trim().split('\n')
+
+                          htmlReports.each { reportFile ->
+                              // Extract report name from file path
+                              def reportName = reportFile.tokenize('/').last()
+
+                              // Read HTML report content
+                              def reportContent = readFile(file: reportFile).trim()
+
+                              // Store report content into PostgreSQL database
+                              storeReportInDatabase(reportName, reportContent)
+                          }
+                      }
+                  }
+              }
+          }
+
+          stage('Convert and Transfer Script') {
+              steps {
+                  script {
+                      try {
+                          // Convert and transfer bash script to target machine
+                          withCredentials([sshUserPrivateKey(credentialsId: 'ssh-credential-id', keyFileVariable: 'SSH_KEY_FILE'),
+                                           usernamePassword(credentialsId: 'docker-repo-credentials', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                              def bashScript = "/var/jenkins_home/workspace/${env.JOB_NAME}/deployment_testserver.sh"
+                              def apiFolder = "/var/jenkins_home/workspace/${env.JOB_NAME}/newman"
+
+                              // Convert line endings to Unix format using dos2unix on Jenkins machine
+                              sh "dos2unix ${bashScript}"
+
+                              // Transfer script and folder to target machine
+                              sh """
+                                  scp -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no ${bashScript} development@10.18.21.240:/home/development/
+                                  rsync -avz -e "ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no" ${apiFolder} development@10.18.21.240:/home/development/
+                              """
+
+                              // Set executable permissions on the script
+                              sh "ssh -i ${SSH_KEY_FILE} development@10.18.21.240 'chmod +x /home/development/deployment_testserver.sh'"
+
+                              // Execute bash script on target machine with environment variables
+                              sh "ssh -i ${SSH_KEY_FILE} development@10.18.21.240 'DOCKER_USER=${DOCKER_USER} DOCKER_PASS=${DOCKER_PASS} bash /home/development/deployment_testserver.sh'"
+                          }
+                      } catch (Exception e) {
+                          echo "Error during script transfer or execution: \${e.message}"
+                          currentBuild.result = 'FAILURE'
+                          error("Stopping pipeline due to failure in script transfer or execution.")
+                      }
+                  }
+              }
+          }
+      }
+  }
+
+  def storeReportInDatabase(reportName, reportContent) {
+      def dbUrl = "jdbc:postgresql://api-test-sonar_db-1:5432/api_test_reports"
+      def dbUser = "sonar"
+      def dbPassword = "sonar"
+      def driver = 'org.postgresql.Driver'
+
+      Class.forName(driver)
+
+      // Establish database connection
+      def sql = groovy.sql.Sql.newInstance(dbUrl, dbUser, dbPassword, driver)
+
+      // Insert report into database
+      sql.execute("INSERT INTO reports (name, content) VALUES (?, ?)", [reportName, reportContent])
+  }
+  

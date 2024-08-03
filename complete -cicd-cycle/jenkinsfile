@@ -1,0 +1,69 @@
+pipeline {
+  agent any
+
+  stages {
+    stage('Checkout') {
+      steps {
+        script {
+          git branch: 'main', credentialsId: 'gitlab-login', url: 'https://gitlab.com/practice-group9221502/cicd-project.git'
+        }
+      }
+    }
+
+    stage('SonarQube Analysis') {
+      steps {
+        withCredentials([string(credentialsId: 'sonar_qube_token', variable: 'SONAR_TOKEN')]) {
+          sh '''
+            /opt/sonar-scanner-5.0.1.3006-linux/bin/sonar-scanner \
+            -Dsonar.projectKey=cicd-project \
+            -Dsonar.sources=. \
+            -Dsonar.host.url=http://10.18.22.172:9001/ \
+            -Dsonar.login=$SONAR_TOKEN
+          '''
+        }
+      }
+    }
+
+    stage('Containerizing PHP Application') {
+      steps {
+        echo 'Building Docker image for PHP application...'
+        sh 'sudo docker build -t docker.mnserviceproviders.com/php_hellow:v1 .'
+      }
+    }
+
+    stage('Push Docker Image') {
+      steps {
+        echo 'Pushing Docker image to private repository...'
+        withCredentials([usernamePassword(credentialsId: 'docker-repo-credentials', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
+          sh '''
+            echo $DOCKER_PASSWORD | sudo docker login -u $DOCKER_USERNAME --password-stdin docker.mnserviceproviders.com
+            sudo docker push docker.mnserviceproviders.com/php_hellow:v1
+          '''
+        }
+      }
+    }
+
+    stage('Convert and Transfer Script') {
+      steps {
+        script {
+          // Convert and transfer bash script to target machine
+          withCredentials([sshUserPrivateKey(credentialsId: 'ssh-credential-id', keyFileVariable: 'SSH_KEY_FILE')]) {
+            def bashScript = '/var/jenkins_home/workspace/cicd-project/deployment_testserver.sh'
+
+            // Convert line endings to Unix format using dos2unix on Jenkins machine
+            sh "dos2unix $bashScript"
+
+            // Transfer script to target machine
+            sh "scp -i $SSH_KEY_FILE \"$bashScript\" development@10.18.22.172:/home/development/"
+
+            // Set executable permissions on the script
+            sh "ssh -i $SSH_KEY_FILE development@10.18.22.172 'chmod +x /home/development/deployment_testserver.sh'"
+
+            // Execute bash script on target machine
+            sh "ssh -i $SSH_KEY_FILE development@10.18.22.172 'bash /home/development/deployment_testserver.sh'"
+          }
+        }
+      }
+    }
+  }
+}

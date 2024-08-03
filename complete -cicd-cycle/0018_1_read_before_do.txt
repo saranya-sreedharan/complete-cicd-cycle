@@ -1,0 +1,2 @@
+1. ---> connect promethsu awith grafana ( datasource as promethus)
+2. Then import dashbaord (9628 -for postgres)

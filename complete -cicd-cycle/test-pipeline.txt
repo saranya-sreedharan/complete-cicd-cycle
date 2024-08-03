@@ -1,0 +1,45 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Checkout') {
+            steps {
+                script {
+                    try {
+                        // Checkout the git repository
+                        git branch: 'test', credentialsId: 'gitlab-login-test', url: 'https://scm.mnserviceproviders.com/mn_service_providers/auto_testing_java.git'
+                    } catch (Exception e) {
+                        echo "Error during checkout: ${e.getMessage()}"
+                        currentBuild.result = 'FAILURE'
+                        error("Stopping pipeline due to checkout failure")
+                    }
+                }
+            }
+        }
+        
+        stage('Test Running') {
+            steps {
+                script {
+                    try {
+                        withCredentials([sshUserPrivateKey(credentialsId: 'ssh-credential-id', keyFileVariable: 'SSH_KEY_FILE')]) {
+                            def testfolder = "/var/jenkins_home/workspace/${env.JOB_NAME}/auto_testing_java"
+
+                            // Transfer the test folder and its contents to the target machine
+                            sh """
+                                rsync -avz -e "ssh -i ${SSH_KEY_FILE} -o StrictHostKeyChecking=no" ${testfolder}/ development@10.18.21.240:/home/development/auto_testing_java/
+                            """
+
+                            // Set executable permissions on the script
+                            sh "ssh -i ${SSH_KEY_FILE} development@10.18.21.240 'chmod +x /home/development/auto_testing_java/runnablejar.jar'"
+                            sh "ssh -i ${SSH_KEY_FILE} development@10.18.21.240 'cd /home/development/auto_testing_java && java -jar runnablejar.jar'"
+                        }
+                    } catch (Exception e) {
+                        echo "Error during test running: ${e.getMessage()}"
+                        currentBuild.result = 'FAILURE'
+                        error("Stopping pipeline due to test running failure")
+                    }
+                }
+            }
+        }
+    }
+}
